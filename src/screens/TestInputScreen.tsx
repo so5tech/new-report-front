@@ -1,3 +1,4 @@
+// TestInputScreen.tsx
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
@@ -9,6 +10,9 @@ import {
   Alert,
   FlatList,
   Modal,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Formik } from 'formik';
 import * as yup from 'yup';
@@ -16,7 +20,6 @@ import { useNavigation } from '@react-navigation/native';
 import axios from 'axios';
 
 import { API_BASE_URL } from '../config/api';
-console.log(API_BASE_URL, "api based---<<<")
 
 const testSchema = yup.object().shape({
   testName: yup.string().required('Test name is required'),
@@ -25,27 +28,47 @@ const testSchema = yup.object().shape({
   referenceRange: yup.string().required('Reference range is required'),
 });
 
-interface Test {
+interface SingleTestResult {
   testName: string;
   observedValue: string;
   unit: string;
   referenceRange: string;
-  isNormal: boolean;
+  isNormal?: boolean;
 }
+
+interface MultiParam {
+  parameterName: string;
+  observedValue: string;
+  unit: string;
+  referenceRange: string;
+}
+
+interface MultiTestResult {
+  testName: string;
+  multiInput: true;
+  parameters: MultiParam[];
+}
+
+type TestResult = SingleTestResult | MultiTestResult;
 
 interface TestInputScreenProps {
   route: any;
 }
 
 const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
   const { patientData } = route.params;
-  const [tests, setTests] = useState<Test[]>([]);
+  const [tests, setTests] = useState<TestResult[]>([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [testSelectionModalVisible, setTestSelectionModalVisible] = useState(false);
   const [availableTests, setAvailableTests] = useState<any[]>([]);
   const [selectedTest, setSelectedTest] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Multi-input state
+  const [multiInputValues, setMultiInputValues] = useState<MultiParam[]>([]);
+  const [currentParamIndex, setCurrentParamIndex] = useState(0);
 
   useEffect(() => {
     fetchAvailableTests();
@@ -55,30 +78,32 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
     try {
       console.log("Fetching tests from:", `${API_BASE_URL}/tests`);
       const response = await axios.get(`${API_BASE_URL}/tests`);
-      console.log("Tests fetched:", response.data.data.length, "tests");
-      setAvailableTests(response.data.data);
+      // expecting response.data.data to be array
+      const data = response?.data?.data ?? [];
+      console.log("Tests fetched:", data.length, "tests");
+      setAvailableTests(data);
     } catch (error) {
       console.error('Error fetching tests:', error);
       Alert.alert(
-        'Connection Error', 
+        'Connection Error',
         'Could not connect to the server. Please ensure the backend is running.'
       );
     }
   };
 
-  const handleAddTest = (values: Test) => {
-    const newTest = {
+  const checkIfNormal = (value: string, range: string): boolean => {
+    // Placeholder: you can enhance range parsing here.
+    return true;
+  };
+
+  const handleAddTest = (values: SingleTestResult) => {
+    const newTest: SingleTestResult = {
       ...values,
       isNormal: checkIfNormal(values.observedValue, values.referenceRange),
     };
-    setTests([...tests, newTest]);
+    setTests(prev => [...prev, newTest]);
     setModalVisible(false);
     setSelectedTest(null);
-  };
-
-  const checkIfNormal = (value: string, range: string): boolean => {
-    // Simple normal range checking - can be enhanced
-    return true; // Placeholder
   };
 
   const handleRemoveTest = (index: number) => {
@@ -106,14 +131,16 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
     }
 
     try {
+      setIsSubmitting(true);
+
       const reportData = {
         ...patientData,
-        age: parseInt(patientData.age),
+        age: patientData.age ? parseInt(patientData.age, 10) : patientData.age,
         testResults: tests,
       };
 
       const response = await axios.post(`${API_BASE_URL}/patients`, reportData);
-      // console.log(response, "data,,,,<<<<<")
+
       Alert.alert(
         'Success',
         'Report submitted successfully!',
@@ -129,17 +156,60 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
     } catch (error) {
       console.error('Error submitting report:', error);
       Alert.alert('Error', 'Failed to submit report. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleTestSelect = (test: any) => {
     setSelectedTest(test);
+
+    if (test?.multiInput) {
+      const init = (test.input || []).map((p: any) => ({
+        parameterName: p.parameterName || p.name || 'Param',
+        observedValue: '',
+        unit: p.unit || '',
+        referenceRange: p.referenceValue || p.referenceRange || '',
+      }));
+      setMultiInputValues(init);
+      setCurrentParamIndex(0);
+    } else {
+      setMultiInputValues([]);
+      setCurrentParamIndex(0);
+    }
+  };
+
+  const addMultiTestToList = () => {
+    // Validate all parameters have observedValue
+    const missing = multiInputValues.findIndex(p => !p.observedValue || p.observedValue.trim() === '');
+    if (missing !== -1) {
+      Alert.alert('Missing value', `Please enter value for ${multiInputValues[missing].parameterName}`);
+      setCurrentParamIndex(missing);
+      return;
+    }
+
+    const result: MultiTestResult = {
+      testName: selectedTest.testName,
+      multiInput: true,
+      parameters: multiInputValues.map(p => ({
+        parameterName: p.parameterName,
+        observedValue: p.observedValue,
+        unit: p.unit,
+        referenceRange: p.referenceRange,
+      })),
+    };
+
+    setTests(prev => [...prev, result]);
+    setModalVisible(false);
+    setSelectedTest(null);
+    setMultiInputValues([]);
+    setCurrentParamIndex(0);
   };
 
   const TestSelectionModal = React.memo(() => {
-    const filteredTests = useMemo(() => 
+    const filteredTests = useMemo(() =>
       availableTests.filter(test =>
-        test.testName.toLowerCase().includes(searchQuery.toLowerCase())
+        (test.testName || '').toLowerCase().includes(searchQuery.toLowerCase())
       ), [availableTests, searchQuery]);
 
     const renderTestItem = React.useCallback(({ item }: { item: any }) => (
@@ -149,16 +219,20 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
           setSelectedTest(item);
           setTestSelectionModalVisible(false);
           setSearchQuery('');
+          // prepare multi state if required
+          handleTestSelect(item);
+          // open add modal immediately
+          setModalVisible(true);
         }}
       >
         <View>
           <Text style={styles.testName}>{item.testName}</Text>
           <Text style={styles.testRange}>
-            Unit: {item.unit} | Range: {item.referenceValue}
+            Unit: {item.unit || (item.input && item.input[0]?.unit) || '—'} | Range: {item.referenceValue || (item.input && item.input[0]?.referenceValue) || '—'}
           </Text>
         </View>
       </TouchableOpacity>
-    ), [setSelectedTest, setTestSelectionModalVisible, setSearchQuery]);
+    ), []);
 
     return (
       <Modal
@@ -173,7 +247,7 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
         <View style={styles.modalContainer}>
           <View style={[styles.modalContent, { maxHeight: '80%' }]}>
             <Text style={styles.modalTitle}>Select Test from Library</Text>
-            
+
             <TextInput
               style={styles.searchInput}
               placeholder="Search tests..."
@@ -182,22 +256,22 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
               autoCapitalize="none"
               autoCorrect={false}
             />
-            
+
             {filteredTests.length === 0 ? (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyText}>
                   {searchQuery ? 'No tests found' : 'No test templates available'}
                 </Text>
                 <Text style={styles.emptySubtext}>
-                  {searchQuery 
-                    ? 'Try a different search term' 
+                  {searchQuery
+                    ? 'Try a different search term'
                     : 'Please ensure MongoDB is running and test data is seeded'}
                 </Text>
               </View>
             ) : (
               <FlatList
                 data={filteredTests}
-                keyExtractor={(item) => item._id}
+                keyExtractor={(item) => (item._id?.$oid || item._id || item._id?.toString() || Math.random().toString())}
                 renderItem={renderTestItem}
                 removeClippedSubviews={true}
                 maxToRenderPerBatch={10}
@@ -205,7 +279,7 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
                 windowSize={10}
               />
             )}
-            
+
             <TouchableOpacity
               style={[styles.button, styles.cancelButton, { marginTop: 10 }]}
               onPress={() => {
@@ -221,117 +295,180 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
     );
   });
 
-  const TestModal = () => (
-    <Modal
-      animationType="slide"
-      transparent={true}
-      visible={modalVisible}
-      onRequestClose={() => setModalVisible(false)}
-    >
-      <View style={styles.modalContainer}>
-        <View style={styles.modalContent}>
-          <Text style={styles.modalTitle}>Add Test Result</Text>
-          
-          <Formik
-            initialValues={{
-              testName: selectedTest?.testName || '',
-              observedValue: '',
-              unit: selectedTest?.unit || '',
-              referenceRange: selectedTest?.referenceValue || '',
-            }}
-            validationSchema={testSchema}
-            onSubmit={handleAddTest}
-            enableReinitialize={true}
-          >
-            {({
-              handleChange,
-              handleBlur,
-              handleSubmit,
-              values,
-              errors,
-              touched,
-              setFieldValue,
-            }) => (
-              <View>
-                <TouchableOpacity
-                  style={styles.testSelector}
-                  onPress={() => setTestSelectionModalVisible(true)}
-                >
-                  <Text style={styles.testSelectorText}>
-                    {selectedTest ? selectedTest.testName : 'Select from library'}
-                  </Text>
-                </TouchableOpacity>
+  const TestModal = () => {
+    const isMulti = !!selectedTest?.multiInput;
 
-                <TextInput
-                  style={[styles.input, touched.testName && errors.testName && styles.errorInput]}
-                  placeholder="Test name"
-                  value={values.testName}
-                  onChangeText={handleChange('testName')}
-                  onBlur={handleBlur('testName')}
-                />
-                {touched.testName && errors.testName && (
-                  <Text style={styles.errorText}>{errors.testName}</Text>
-                )}
+    return (
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={modalVisible}
+        onRequestClose={() => {
+          setModalVisible(false);
+          setSelectedTest(null);
+          setMultiInputValues([]);
+          setCurrentParamIndex(0);
+        }}
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalContainer}>
+          <View style={[styles.modalContent, { maxHeight: '85%' }]}>
+            <Text style={styles.modalTitle}>
+              {selectedTest?.testName || 'Add Test Result'}
+            </Text>
 
-                <TextInput
-                  style={[styles.input, touched.observedValue && errors.observedValue && styles.errorInput]}
-                  placeholder="Observed value"
-                  value={values.observedValue}
-                  onChangeText={handleChange('observedValue')}
-                  onBlur={handleBlur('observedValue')}
-                />
-                {touched.observedValue && errors.observedValue && (
-                  <Text style={styles.errorText}>{errors.observedValue}</Text>
-                )}
+            {isMulti ? (
+              <>
+                <View style={styles.multiHeader}>
+                  <TouchableOpacity
+                    disabled={currentParamIndex === 0}
+                    onPress={() => setCurrentParamIndex(prev => Math.max(0, prev - 1))}
+                    style={[styles.navArrow, currentParamIndex === 0 && styles.disabledArrow]}
+                  >
+                    <Text style={[styles.arrowText, currentParamIndex === 0 && styles.disabledArrowText]}>◀</Text>
+                  </TouchableOpacity>
 
-                <TextInput
-                  style={[styles.input, touched.unit && errors.unit && styles.errorInput]}
-                  placeholder="Unit"
-                  value={values.unit}
-                  onChangeText={handleChange('unit')}
-                  onBlur={handleBlur('unit')}
-                  editable={!selectedTest}
-                />
-                {touched.unit && errors.unit && (
-                  <Text style={styles.errorText}>{errors.unit}</Text>
-                )}
+                  <View style={styles.paramTitleWrap}>
+                    <Text style={styles.paramTitle}>
+                      {multiInputValues[currentParamIndex]?.parameterName || `Parameter ${currentParamIndex + 1}`}
+                    </Text>
+                    <Text style={styles.paramSubtitle}>
+                      {currentParamIndex + 1} / {multiInputValues.length}
+                    </Text>
+                  </View>
 
-                <TextInput
-                  style={[styles.input, touched.referenceRange && errors.referenceRange && styles.errorInput]}
-                  placeholder="Reference range"
-                  value={values.referenceRange}
-                  onChangeText={handleChange('referenceRange')}
-                  onBlur={handleBlur('referenceRange')}
-                  editable={!selectedTest}
-                />
-                {touched.referenceRange && errors.referenceRange && (
-                  <Text style={styles.errorText}>{errors.referenceRange}</Text>
-                )}
+                  <TouchableOpacity
+                    disabled={currentParamIndex === multiInputValues.length - 1}
+                    onPress={() => setCurrentParamIndex(prev => Math.min(multiInputValues.length - 1, prev + 1))}
+                    style={[styles.navArrow, currentParamIndex === multiInputValues.length - 1 && styles.disabledArrow]}
+                  >
+                    <Text style={[styles.arrowText, currentParamIndex === multiInputValues.length - 1 && styles.disabledArrowText]}>▶</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <ScrollView style={{ marginTop: 10 }}>
+                  <Text style={styles.label}>Parameter</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: '#f0f3f5' }]}
+                    value={multiInputValues[currentParamIndex]?.parameterName || ''}
+                    editable={false}
+                  />
+
+                  <Text style={styles.label}>Observed Value *</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Enter observed value"
+                    value={multiInputValues[currentParamIndex]?.observedValue}
+                    onChangeText={(txt) => {
+                      const arr = [...multiInputValues];
+                      arr[currentParamIndex] = { ...arr[currentParamIndex], observedValue: txt };
+                      setMultiInputValues(arr);
+                    }}
+                    keyboardType="default"
+                  />
+
+                  <Text style={styles.label}>Unit</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: '#f0f3f5' }]}
+                    value={multiInputValues[currentParamIndex]?.unit || ''}
+                    editable={false}
+                  />
+
+                  <Text style={styles.label}>Reference Range</Text>
+                  <TextInput
+                    style={[styles.input, { backgroundColor: '#f0f3f5' }]}
+                    value={multiInputValues[currentParamIndex]?.referenceRange || ''}
+                    editable={false}
+                  />
+                </ScrollView>
 
                 <View style={styles.modalButtons}>
                   <TouchableOpacity
                     style={[styles.button, styles.cancelButton]}
                     onPress={() => {
-                      setModalVisible(false);
                       setSelectedTest(null);
+                      setModalVisible(false);
+                      setMultiInputValues([]);
+                      setCurrentParamIndex(0);
                     }}
                   >
                     <Text style={styles.buttonText}>Cancel</Text>
                   </TouchableOpacity>
+
                   <TouchableOpacity
                     style={[styles.button, styles.addButton]}
-                    onPress={() => handleSubmit()}
+                    onPress={() => addMultiTestToList()}
                   >
                     <Text style={styles.buttonText}>Add Test</Text>
                   </TouchableOpacity>
                 </View>
-              </View>
+              </>
+            ) : (
+              <Formik
+                initialValues={{
+                  testName: selectedTest?.testName || '',
+                  observedValue: '',
+                  unit: selectedTest?.unit || '',
+                  referenceRange: selectedTest?.referenceValue || '',
+                }}
+                validationSchema={testSchema}
+                onSubmit={(vals) => handleAddTest(vals as SingleTestResult)}
+                enableReinitialize={true}
+              >
+                {({ handleChange, handleBlur, handleSubmit, values, errors, touched }) => (
+                  <>
+                    <Text style={styles.label}>Observed Value</Text>
+                    <TextInput
+                      style={[styles.input, touched.observedValue && errors.observedValue && styles.errorInput]}
+                      placeholder="Observed value"
+                      value={values.observedValue}
+                      onChangeText={handleChange('observedValue')}
+                      onBlur={handleBlur('observedValue')}
+                    />
+                    {touched.observedValue && errors.observedValue && <Text style={styles.errorText}>{errors.observedValue}</Text>}
+
+                    <Text style={styles.label}>Unit</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={values.unit}
+                      editable={!selectedTest}
+                      onChangeText={handleChange('unit')}
+                    />
+
+                    <Text style={styles.label}>Reference Range</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={values.referenceRange}
+                      editable={!selectedTest}
+                      onChangeText={handleChange('referenceRange')}
+                    />
+
+                    <View style={styles.modalButtons}>
+                      <TouchableOpacity
+                        style={[styles.button, styles.cancelButton]}
+                        onPress={() => {
+                          setModalVisible(false);
+                          setSelectedTest(null);
+                        }}
+                      >
+                        <Text style={styles.buttonText}>Cancel</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.button, styles.addButton]}
+                        onPress={() => handleSubmit()}
+                      >
+                        <Text style={styles.buttonText}>Add Test</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
+                )}
+              </Formik>
             )}
-          </Formik>
-        </View>
-      </View>
-    </Modal>
-  );
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    );
+  };
 
   return (
     <View style={styles.container}>
@@ -346,7 +483,7 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
             <Text style={styles.testCount}>Tests Added: {tests.length}</Text>
             <TouchableOpacity
               style={styles.addButton}
-              onPress={() => setModalVisible(true)}
+              onPress={() => setTestSelectionModalVisible(true)}
             >
               <Text style={styles.addButtonText}>+ Add Test</Text>
             </TouchableOpacity>
@@ -364,13 +501,27 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
               renderItem={({ item, index }) => (
                 <View style={styles.testItem}>
                   <View style={styles.testInfo}>
-                    <Text style={styles.testName}>{item.testName}</Text>
-                    <Text style={styles.testValue}>
-                      {item.observedValue} {item.unit}
-                    </Text>
-                    <Text style={styles.testRange}>
-                      Reference: {item.referenceRange}
-                    </Text>
+                    <Text style={styles.testName}>{(item as any).testName}</Text>
+
+                    {('multiInput' in item && item.multiInput) ? (
+                      (item as MultiTestResult).parameters.map((p, i) => (
+                        <View key={i} style={{ marginTop: 6 }}>
+                          <Text style={styles.testValue}>
+                            {p.parameterName}: {p.observedValue} {p.unit}
+                          </Text>
+                          <Text style={styles.testRange}>Ref: {p.referenceRange}</Text>
+                        </View>
+                      ))
+                    ) : (
+                      <>
+                        <Text style={styles.testValue}>
+                          {(item as SingleTestResult).observedValue} {(item as SingleTestResult).unit}
+                        </Text>
+                        <Text style={styles.testRange}>
+                          Reference: {(item as SingleTestResult).referenceRange}
+                        </Text>
+                      </>
+                    )}
                   </View>
                   <TouchableOpacity
                     style={styles.removeButton}
@@ -387,11 +538,18 @@ const TestInputScreen: React.FC<TestInputScreenProps> = ({ route }) => {
 
       <View style={styles.footer}>
         <TouchableOpacity
-          style={[styles.submitButton, tests.length === 0 && styles.disabledButton]}
+          style={[
+            styles.submitButton,
+            (tests.length === 0 || isSubmitting) && styles.disabledButton
+          ]}
           onPress={handleSubmitReport}
-          disabled={tests.length === 0}
+          disabled={tests.length === 0 || isSubmitting}
         >
-          <Text style={styles.submitButtonText}>Generate Report</Text>
+          {isSubmitting ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.submitButtonText}>Generate Report</Text>
+          )}
         </TouchableOpacity>
       </View>
 
@@ -465,7 +623,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
   },
   testInfo: {
     flex: 1,
@@ -487,6 +645,7 @@ const styles = StyleSheet.create({
   },
   removeButton: {
     padding: 8,
+    marginLeft: 10,
   },
   removeButtonText: {
     color: '#e74c3c',
@@ -526,7 +685,7 @@ const styles = StyleSheet.create({
   modalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    marginBottom: 20,
+    marginBottom: 10,
     textAlign: 'center',
   },
   testSelector: {
@@ -567,13 +726,13 @@ const styles = StyleSheet.create({
   modalButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 20,
+    marginTop: 12,
   },
   button: {
     flex: 1,
-    padding: 15,
+    padding: 12,
     borderRadius: 8,
-    marginHorizontal: 5,
+    marginHorizontal: 6,
     alignItems: 'center',
   },
   cancelButton: {
@@ -585,6 +744,44 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#fff',
     fontWeight: 'bold',
+  },
+
+  /* Multi input specific */
+  multiHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  navArrow: {
+    padding: 8,
+  },
+  disabledArrow: {
+    opacity: 0.4,
+  },
+  arrowText: {
+    fontSize: 20,
+  },
+  disabledArrowText: {
+    color: '#999',
+  },
+  paramTitleWrap: {
+    alignItems: 'center',
+  },
+  paramTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#2c3e50',
+  },
+  paramSubtitle: {
+    fontSize: 12,
+    color: '#7f8c8d',
+  },
+  label: {
+    fontSize: 13,
+    color: '#34495e',
+    marginBottom: 6,
+    marginTop: 6,
   },
 });
 
